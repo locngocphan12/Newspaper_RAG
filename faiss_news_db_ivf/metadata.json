@@ -1,0 +1,7 @@
+{
+  "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "index_type": "IVF",
+  "nprobe": 10,
+  "nlist": 100,
+  "ntotal": 8073
+}
