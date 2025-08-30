@@ -1,10 +1,15 @@
 from fastapi import FastAPI
-from .auth import auth_router
+from backend.auth import auth_router
+from backend.routes.query import query_router
+from backend.routes.history import history_router
 
-app = FastAPI()
+app = FastAPI(title="Newspaper RAG API")
 
-app.include_router(auth_router, prefix="/auth")
+# Đăng ký các router
+app.include_router(auth_router, prefix="/auth", tags=["auth"])
+app.include_router(query_router, tags=["query"])
+app.include_router(history_router, tags=["history"])
 
 @app.get("/")
 def root():
-    return {"msg": "Backend running!"}
+    return {"msg": "🚀 RAG API running..."}
