@@ -8,3 +8,6 @@ class UserSignup(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+
+class QueryRequest(BaseModel):
+    query: str

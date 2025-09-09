@@ -1,2 +1,5 @@
 data/
 .env*
+__pycache__/
+faiss_news_db/
+faiss_news_db_ivf/
