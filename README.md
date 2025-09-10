@@ -3,7 +3,7 @@
 ## 📌 Giới thiệu  
 Ứng dụng chat tích hợp **Retrieval-Augmented Generation (RAG)** với các tính năng chính:  
 - 🔑 Đăng ký / Đăng nhập bằng **JWT Authentication**.  
-- 💬 Chat với hệ thống (fake RAG answer hoặc tích hợp mô hình thực).  
+- 💬 Chat với hệ thống (thông qua RAG backend).  
 - 📂 Lưu lại **lịch sử hội thoại** trong MongoDB.  
 - 📜 Xem lại & tải lại đoạn hội thoại trong Sidebar.  
 
@@ -17,4 +17,5 @@
 - **Ngôn ngữ**: TypeScript, Python  
 
 ---
+
 
