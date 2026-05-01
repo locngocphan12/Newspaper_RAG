@@ -3,3 +3,4 @@ data/
 __pycache__/
 faiss_news_db/
 faiss_news_db_ivf/
+/faiss_news_db_ivf/

@@ -52,9 +52,9 @@ export default function Sidebar({
       {/* Nội dung sidebar (giả sử sau này là list history) */}
       <div className="flex-1 overflow-y-auto space-y-2">
         {open &&
-          history.map((chat) => (
+          history.map((chat, idx) => (
             <div
-              key={chat._id || chat.timestamp || idx}
+              key={chat.timestamp || idx}
               className="p-2 bg-gray-800 rounded hover:bg-gray-700 cursor-pointer"
             >
               <p className="truncate text-sm">{chat.query}</p>

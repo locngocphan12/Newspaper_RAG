@@ -52,14 +52,15 @@ export const queryRag = async (query: string, token: string) => {
     return res.data;
 };
 
-// Lấy history chat logs
+// Lấy history chat logs – trả về mảng trực tiếp
 export const getHistory = async (token: string) => {
   const res = await api.get("/history", {
     headers: {
       Authorization: `Bearer ${token}`,
     },
   });
-  return res.data; // danh sách chat logs
+  // Backend trả về { total_returned, history: [...] } – lấy mảng history
+  return Array.isArray(res.data) ? res.data : (res.data.history ?? []);
 };
 
 

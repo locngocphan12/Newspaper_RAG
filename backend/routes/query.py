@@ -1,85 +1,113 @@
 import os
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
+from dotenv import load_dotenv
+
 from backend.auth_fol.auth_bearer import JWTBearer
 from backend.utils import decode_jwt
 from backend.database import db
 from datetime import datetime
 from backend.models import QueryRequest
-from uuid import uuid4
-from dotenv import load_dotenv
 from ..rag_cli import RAGChatbot
-import time
+
+load_dotenv()
 
 query_router = APIRouter()
 chat_collection = db["chat_logs"]
-DB = "faiss_news_db_ivf"
-API_KEY = os.getenv("API_KEY")
-chatbot = RAGChatbot(db_dir=DB, api_key=API_KEY)
 
-# Pipeline RAG result
-def rag_pipeline(query: str):
+DB_PATH = "faiss_news_db_ivf"
+API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Lazy singleton – khởi tạo khi lần đầu được gọi
+_chatbot: RAGChatbot | None = None
+
+
+def get_chatbot() -> RAGChatbot:
+    """Trả về chatbot singleton, khởi tạo nếu chưa có."""
+    global _chatbot
+    if _chatbot is None:
+        if not API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not set in environment variables.")
+        _chatbot = RAGChatbot(
+            db_dir=DB_PATH,
+            api_key=API_KEY,
+            use_reranker=True,
+            use_hybrid=True,      # FAISS + BM25 + RRF
+        )
+    return _chatbot
+
+
+# ─────────────────────────── RAG PIPELINE ────────────────────────────
+
+def rag_pipeline(query: str) -> dict:
     """
-    Data trả về cho RAG pipeline
+    Chạy RAG pipeline: retrieve → rerank → generate.
+    Trả về answer, sources (với similarity_score & rerank_score), used_k, processing_time.
     """
+    chatbot = get_chatbot()
     start_time = time.time()
     result, used_k = chatbot.enhanced_search(query)
-    end_time = time.time()
-    response = {
-        "answer": result["answer"],
-        "used_k": used_k,
-        "processing_time": round(end_time - start_time, 2),
-        "sources": []
-    }
+    processing_time = round(time.time() - start_time, 2)
 
+    sources = []
     for i, doc in enumerate(result["context"], 1):
-        response["sources"].append({
+        sources.append({
             "doc_id": i,
             "url": doc.metadata.get("id", "N/A"),
-            "score": getattr(doc, "score", None)
+            "section": doc.metadata.get("section", ""),
+            "subsection": doc.metadata.get("subsection", ""),
+            "similarity_score": doc.metadata.get("similarity_score"),
+            "bm25_score": doc.metadata.get("bm25_score"),
+            "rrf_score": doc.metadata.get("rrf_score"),
+            "rerank_score": doc.metadata.get("rerank_score"),
+            "snippet": doc.page_content[:200],
         })
 
-    return response
-    # return result["answer"]
+    return {
+        "answer": result["answer"],
+        "used_k": used_k,
+        "processing_time": processing_time,
+        "sources": sources,
+    }
+
+
+# ─────────────────────────── ENDPOINT ────────────────────────────────
 
 @query_router.post("/query")
-def query_rag(req: QueryRequest, token: str = Depends(JWTBearer())):
+async def query_rag(req: QueryRequest, token: str = Depends(JWTBearer())):
     """
-    Route gọi RAG
+    Endpoint RAG: nhận câu hỏi → trả lời từ dữ liệu báo chí.
     """
+    payload = decode_jwt(token)
+    username = payload.get("sub")
+    if not username:
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+    query = req.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
     try:
-        # Giải mã JWT để lấy user
-        payload = decode_jwt(token)
-        username = payload.get("sub")
-        if not username:
-            raise HTTPException(status_code=403, detail="Invalid token")
-        query = req.query
-        # Gọi RAG
         response = rag_pipeline(query)
-
-        chat_collection.insert_one({
-            "user": username,
-            "query": query,
-            "answer": response["answer"],
-            "sources": response["sources"],
-            "used_k": response["used_k"],
-            "processing_time": response["processing_time"],
-            "timestamp": datetime.utcnow()
-        })
-
-        return {
-            "user": username,
-            "query": query,
-            **response
-        }
-        # # Lưu log vào MongoDB
-        # chat_collection.insert_one({
-        #     "user": username,
-        #     "query": query,
-        #     "answer": answer,
-        #     "timestamp": datetime.utcnow()
-        # })
-        #
-        # return {"user": username, "query": query, "answer": answer}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"RAG pipeline error: {str(e)}")
+
+    # Lưu log vào MongoDB
+    chat_collection.insert_one({
+        "user": username,
+        "query": query,
+        "answer": response["answer"],
+        "sources": response["sources"],
+        "used_k": response["used_k"],
+        "processing_time": response["processing_time"],
+        "timestamp": datetime.utcnow(),
+    })
+
+    return {
+        "user": username,
+        "query": query,
+        **response,
+    }

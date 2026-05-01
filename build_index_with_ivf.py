@@ -9,7 +9,7 @@ from langchain_community.vectorstores import FAISS
 from langchain.docstore.in_memory import InMemoryDocstore
 import numpy as np
 
-DATA_DIR = "D:\\pythonProject\\NewspaperRAG\\data"
+DATA_DIR = "E:\\pythonProject\\NewspaperRAG\\NewspaperRAG\\data"
 DB_DIR = "faiss_news_db_ivf"
 
 
