@@ -6,20 +6,12 @@ import { getToken } from "@/lib/auth";
 import Sidebar from "./SideBar";
 import MessageList from "./MessageList";
 import ChatBox from "./ChatBox";
-import { queryRag } from "@/lib/app";
+import { queryRagStream, Source } from "@/lib/app";
 
-type Source = {
-  doc_id: number;
-  url: string;
-  section?: string;
-  similarity_score?: number | null;
-  rerank_score?: number | null;
-  snippet?: string;
-};
-
-type Message = {
+export type Message = {
   role: "user" | "assistant";
   content: string;
+  isStreaming?: boolean;
   meta?: {
     processing_time: number;
     used_k: number;
@@ -31,53 +23,80 @@ export default function ChatPage() {
   const router = useRouter();
   const [messages, setMessages] = useState<Message[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isStreaming, setIsStreaming] = useState(false);
 
-  // Kiểm tra token khi load trang
   useEffect(() => {
     const token = getToken();
-    if (!token) {
-      router.push("/login");
-    }
+    if (!token) router.push("/login");
   }, [router]);
 
-  // Hàm gửi tin nhắn
   const handleSend = async (text: string) => {
+    if (isStreaming) return;
+
     // Thêm tin nhắn user
     setMessages((prev) => [...prev, { role: "user", content: text }]);
-    try {
-      const token = localStorage.getItem("token") || "";
-      const data = await queryRag(text, token);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.answer || "Không có câu trả lời",
-          meta: {
-            processing_time: data.processing_time ?? 0,
-            used_k: data.used_k ?? 0,
-            sources: data.sources ?? [],
-          },
-        },
-      ]);
-    } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "⚠️ Lỗi khi gọi RAG. Vui lòng thử lại." },
-      ]);
-    }
+
+    // Thêm placeholder cho assistant (đang stream)
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant", content: "", isStreaming: true },
+    ]);
+    setIsStreaming(true);
+
+    const token = localStorage.getItem("token") ?? "";
+
+    await queryRagStream(
+      text,
+      token,
+      // onToken: append từng chunk vào tin nhắn cuối
+      (content) => {
+        setMessages((prev) => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          updated[updated.length - 1] = {
+            ...last,
+            content: last.content + content,
+          };
+          return updated;
+        });
+      },
+      // onDone: gắn sources + tắt streaming cursor
+      (sources, usedK, processingTime) => {
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = {
+            ...updated[updated.length - 1],
+            isStreaming: false,
+            meta: { processing_time: processingTime, used_k: usedK, sources },
+          };
+          return updated;
+        });
+        setIsStreaming(false);
+      },
+      // onError
+      (error) => {
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = {
+            role: "assistant",
+            content: `⚠️ ${error}`,
+            isStreaming: false,
+          };
+          return updated;
+        });
+        setIsStreaming(false);
+      }
+    );
   };
 
   return (
     <div className="flex h-screen bg-gray-900 text-white">
-      {/* Sidebar */}
       <Sidebar open={sidebarOpen} setOpen={setSidebarOpen} />
-
-      {/* Chat area */}
       <div className="flex flex-col flex-1">
         <div className="flex-1 overflow-y-auto p-4">
           <MessageList messages={messages} />
         </div>
-        <ChatBox onSend={handleSend} />
+        <ChatBox onSend={handleSend} disabled={isStreaming} />
       </div>
     </div>
   );

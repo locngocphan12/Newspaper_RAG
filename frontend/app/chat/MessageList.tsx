@@ -1,23 +1,6 @@
 "use client";
 
-type Source = {
-  doc_id: number;
-  url: string;
-  section?: string;
-  similarity_score?: number | null;
-  rerank_score?: number | null;
-  snippet?: string;
-};
-
-type Message = {
-  role: "user" | "assistant";
-  content: string;
-  meta?: {
-    processing_time: number;
-    used_k: number;
-    sources: Source[];
-  };
-};
+import type { Message } from "./page";
 
 export default function MessageList({ messages }: { messages: Message[] }) {
   return (
@@ -31,9 +14,16 @@ export default function MessageList({ messages }: { messages: Message[] }) {
               : "bg-gray-800 text-gray-100 mr-auto"
           }`}
         >
-          <p>{m.content}</p>
+          {/* Message content + streaming cursor */}
+          <p className="whitespace-pre-wrap">
+            {m.content}
+            {m.isStreaming && (
+              <span className="inline-block w-2 h-4 bg-gray-300 animate-pulse ml-0.5 align-middle rounded-sm" />
+            )}
+          </p>
 
-          {m.role === "assistant" && m.meta && (
+          {/* Sources + metadata – chỉ hiện khi stream xong */}
+          {m.role === "assistant" && !m.isStreaming && m.meta && (
             <div className="mt-3 text-sm text-gray-300 border-t border-gray-600 pt-2">
               <p>
                 ⏱️ {m.meta.processing_time}s | 📄 {m.meta.used_k} docs
@@ -51,15 +41,22 @@ export default function MessageList({ messages }: { messages: Message[] }) {
                       >
                         {src.url}
                       </a>
-                      {/* Ưu tiên hiển thị rerank_score, fallback sang similarity_score */}
+                      {/* Rerank score (ưu tiên) */}
                       {src.rerank_score != null && (
                         <span className="ml-2 text-green-400">
-                          (rerank: {src.rerank_score.toFixed(3)})
+                          rerank: {src.rerank_score.toFixed(3)}
                         </span>
                       )}
+                      {/* RRF score */}
+                      {src.rrf_score != null && (
+                        <span className="ml-2 text-yellow-400">
+                          rrf: {src.rrf_score.toFixed(4)}
+                        </span>
+                      )}
+                      {/* FAISS similarity */}
                       {src.similarity_score != null && (
                         <span className="ml-2 text-gray-400">
-                          (sim: {src.similarity_score.toFixed(4)})
+                          sim: {src.similarity_score.toFixed(4)}
                         </span>
                       )}
                       {src.snippet && (

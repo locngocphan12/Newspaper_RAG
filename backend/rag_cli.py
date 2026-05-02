@@ -1,11 +1,14 @@
 import argparse
+import asyncio
 import os
+import pickle
 import re
 import time
-from typing import Tuple, Dict, Any, List, Optional
+from typing import AsyncGenerator, Tuple, Dict, Any, List, Optional
 
 import warnings
 import numpy as np
+from tqdm import tqdm
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -18,6 +21,15 @@ from langchain.prompts import PromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from sentence_transformers import CrossEncoder
 from rank_bm25 import BM25Okapi
+
+# ── Vietnamese tokenizer (underthesea) – optional but strongly recommended ──
+try:
+    from underthesea import word_tokenize as _vn_word_tokenize
+    _HAS_UNDERTHESEA = True
+except ImportError:
+    _HAS_UNDERTHESEA = False
+    print("⚠️  underthesea not found – BM25 will use whitespace tokenization.")
+    print("    Install with: pip install underthesea")
 
 
 class RAGChatbot:
@@ -131,25 +143,60 @@ Nếu không có thông tin, hãy nói: "Tôi không có thông tin trong dữ l
             self.reranker = None
             self.use_reranker = False
 
+    # ─────────────────────────── TOKENIZER ────────────────────────────
+
+    def _tokenize_text(self, text: str) -> List[str]:
+        """
+        Tokenize text – dùng underthesea nếu có, fallback sang whitespace split.
+
+        underthesea giữ nguyên từ ghép tiếng Việt:
+            "bất động sản" → ["bất động sản"]   (1 token, đúng)
+        whitespace split:
+            "bất động sản" → ["bất", "động", "sản"]  (3 tokens rời rạc, sai)
+        """
+        if _HAS_UNDERTHESEA:
+            return [t.lower() for t in _vn_word_tokenize(text)]
+        return text.lower().split()
+
     def _init_bm25(self):
-        """Build BM25 index từ toàn bộ documents trong FAISS docstore"""
-        print("⏳ Building BM25 index from FAISS docstore...")
-        print("   ⚠️  Có thể mất 30-60 giây với large database...")
+        """Build BM25 index từ FAISS docstore, có cache để tránh tokenize lại mỗi lần."""
+        cache_path = os.path.join(self.db_dir, "bm25_tokenized_cache.pkl")
 
         # Lấy tất cả documents từ FAISS docstore
         self.bm25_docs: List[Document] = list(self.db.docstore._dict.values())
         self.bm25_doc_ids: List[str] = list(self.db.docstore._dict.keys())
 
-        # Tokenize: simple whitespace split (phù hợp tiếng Việt cơ bản)
-        tokenized_corpus = [doc.page_content.lower().split() for doc in self.bm25_docs]
-        self.bm25 = BM25Okapi(tokenized_corpus)
+        # ── Load from cache ────────────────────────────────────────────
+        if os.path.exists(cache_path):
+            print("⏳ Loading BM25 tokenized corpus from cache...")
+            with open(cache_path, "rb") as f:
+                tokenized_corpus = pickle.load(f)
+            tokenizer_note = "(cached)"
+        else:
+            # ── Build tokenized corpus ─────────────────────────────────
+            tokenizer_name = "underthesea (Vietnamese)" if _HAS_UNDERTHESEA else "whitespace"
+            print(f"⏳ Building BM25 index with {tokenizer_name} tokenizer...")
+            if _HAS_UNDERTHESEA:
+                print("   ⚠️  First-time Vietnamese tokenization – có thể mất 10–30 phút...")
+            else:
+                print("   ⚠️  Fallback to whitespace split (kém chất lượng với tiếng Việt).")
 
-        # Tạo lookup dict: content_hash → index trong bm25_docs
+            tokenized_corpus = [
+                self._tokenize_text(doc.page_content)
+                for doc in tqdm(self.bm25_docs, desc="   Tokenizing docs", unit="doc")
+            ]
+
+            # Save cache
+            with open(cache_path, "wb") as f:
+                pickle.dump(tokenized_corpus, f)
+            print(f"✅ BM25 corpus cache saved → {cache_path}")
+            tokenizer_note = f"(tokenizer: {tokenizer_name})"
+
+        self.bm25 = BM25Okapi(tokenized_corpus)
         self._content_to_bm25_idx = {
             doc.page_content: i for i, doc in enumerate(self.bm25_docs)
         }
-
-        print(f"✅ BM25 index built with {len(self.bm25_docs)} documents")
+        print(f"✅ BM25 index built – {len(self.bm25_docs):,} docs {tokenizer_note}")
 
     # ─────────────────────────── HYBRID SEARCH ────────────────────────────
 
@@ -160,7 +207,8 @@ Nếu không có thông tin, hãy nói: "Tôi không có thông tin trong dữ l
         Returns:
             List of (document, normalized_bm25_score)
         """
-        tokenized_query = query.lower().split()
+        # Dùng cùng tokenizer với corpus để đảm bảo matching nhất quán
+        tokenized_query = self._tokenize_text(query)
         raw_scores = self.bm25.get_scores(tokenized_query)
 
         # Lấy top-k indices
@@ -418,6 +466,49 @@ Nếu không có thông tin, hãy nói: "Tôi không có thông tin trong dữ l
         }
 
         return result, k
+
+    async def enhanced_search_stream(
+        self, query: str
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Streaming version của enhanced_search.
+        Yields SSE event dicts:
+          {"type": "token",   "content": "..."}          – LLM token
+          {"type": "done",    "sources": [...],
+           "used_k": 3, "processing_time": 5.2}          – kết thúc stream
+          {"type": "error",   "detail": "..."}            – lỗi
+        """
+        clean_query, k = self.parse_search_params(query)
+
+        # Retrieve + Rerank chạy trong thread pool để không block event loop
+        top_docs = await asyncio.to_thread(self.retrieve_and_rerank, clean_query, k)
+
+        # Build sources metadata (gửi sau khi stream xong)
+        sources = []
+        for i, doc in enumerate(top_docs, 1):
+            sources.append({
+                "doc_id": i,
+                "url": doc.metadata.get("id", "N/A"),
+                "section": doc.metadata.get("section", ""),
+                "subsection": doc.metadata.get("subsection", ""),
+                "similarity_score": doc.metadata.get("similarity_score"),
+                "bm25_score": doc.metadata.get("bm25_score"),
+                "rrf_score": doc.metadata.get("rrf_score"),
+                "rerank_score": doc.metadata.get("rerank_score"),
+                "snippet": doc.page_content[:200],
+            })
+
+        # Stream LLM response token-by-token
+        async for chunk in self.combine_docs_chain.astream({
+            "input": clean_query,
+            "context": top_docs
+        }):
+            # combine_docs_chain có thể yield str hoặc AIMessageChunk
+            content = chunk if isinstance(chunk, str) else getattr(chunk, "content", "")
+            if content:
+                yield {"type": "token", "content": content}
+
+        yield {"type": "done", "sources": sources, "used_k": k}
 
     # ─────────────────────────── UTILITIES ────────────────────────────
 

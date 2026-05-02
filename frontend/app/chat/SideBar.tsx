@@ -1,7 +1,7 @@
 "use client";
 import { Menu, X, LogOut, HelpCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { getHistory, load } from "@/lib/app";
+import { getHistory } from "@/lib/app";
 import { useEffect, useState } from "react";
 
 export default function Sidebar({

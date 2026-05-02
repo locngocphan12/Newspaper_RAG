@@ -1,13 +1,15 @@
+import json
 import os
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
 from backend.auth_fol.auth_bearer import JWTBearer
 from backend.utils import decode_jwt
 from backend.database import db
-from datetime import datetime
+from datetime import datetime, timezone
 from backend.models import QueryRequest
 from ..rag_cli import RAGChatbot
 
@@ -103,7 +105,7 @@ async def query_rag(req: QueryRequest, token: str = Depends(JWTBearer())):
         "sources": response["sources"],
         "used_k": response["used_k"],
         "processing_time": response["processing_time"],
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc),
     })
 
     return {
@@ -111,3 +113,78 @@ async def query_rag(req: QueryRequest, token: str = Depends(JWTBearer())):
         "query": query,
         **response,
     }
+
+
+# ─────────────────────────── STREAMING ENDPOINT ──────────────────────────────
+
+@query_router.post("/query/stream")
+async def query_rag_stream(req: QueryRequest, token: str = Depends(JWTBearer())):
+    """
+    Streaming RAG endpoint (Server-Sent Events).
+    Yields:
+      data: {"type": "token",   "content": "..."}
+      data: {"type": "done",    "sources": [...], "used_k": N, "processing_time": X}
+      data: {"type": "error",   "detail": "..."}
+    """
+    import asyncio
+
+    payload = decode_jwt(token)
+    username = payload.get("sub")
+    if not username:
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+    query = req.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    try:
+        chatbot = get_chatbot()
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    start_time = time.time()
+
+    async def event_generator():
+        full_answer: list[str] = []
+        sources_data: list = []
+        used_k: int = 0
+
+        try:
+            async for event in chatbot.enhanced_search_stream(query):
+                if event["type"] == "token":
+                    full_answer.append(event["content"])
+                elif event["type"] == "done":
+                    sources_data = event.get("sources", [])
+                    used_k = event.get("used_k", 0)
+                    event["processing_time"] = round(time.time() - start_time, 2)
+
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            # Log to MongoDB after full stream (non-blocking)
+            await asyncio.to_thread(
+                chat_collection.insert_one,
+                {
+                    "user": username,
+                    "query": query,
+                    "answer": "".join(full_answer),
+                    "sources": sources_data,
+                    "used_k": used_k,
+                    "processing_time": round(time.time() - start_time, 2),
+                    "timestamp": datetime.now(timezone.utc),
+                },
+            )
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # tắt buffering qua nginx proxy
+            "Connection": "keep-alive",
+        },
+    )
+
+
